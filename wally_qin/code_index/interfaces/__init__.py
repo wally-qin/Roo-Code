@@ -229,6 +229,10 @@ class CodeIndexConfig:
     gemini_api_key: Optional[str] = None
     qdrant_url: Optional[str] = None
     qdrant_api_key: Optional[str] = None
+    milvus_host: Optional[str] = None
+    milvus_port: Optional[str] = None
+    milvus_user: Optional[str] = None
+    milvus_password: Optional[str] = None
     search_min_score: Optional[float] = None
     search_max_results: Optional[int] = None
 
@@ -248,3 +252,7 @@ class ConfigSnapshot:
     gemini_api_key: str
     qdrant_url: str
     qdrant_api_key: str
+    milvus_host: str
+    milvus_port: str
+    milvus_user: str
+    milvus_password: str

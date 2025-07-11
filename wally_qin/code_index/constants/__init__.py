@@ -72,10 +72,16 @@ LANGUAGE_EXTENSIONS = {
     "elm": [".elm"],
 }
 
+# 向量数据库选项
+VECTOR_STORE_OPTIONS = ["qdrant", "milvus"]
+
 # 默认配置
 DEFAULT_CONFIG = {
     "embedder_provider": "openai",
+    "vector_store": "qdrant",  # 默认使用Qdrant
     "qdrant_url": "http://localhost:6333",
+    "milvus_host": "localhost",  # Milvus配置
+    "milvus_port": "19530",
     "openai_model": "text-embedding-3-small",
     "search_min_score": DEFAULT_SEARCH_MIN_SCORE,
     "search_max_results": DEFAULT_MAX_SEARCH_RESULTS,

@@ -15,7 +15,7 @@
 - 📁 **增量索引**: 智能检测文件变化，只处理修改过的文件
 - ⚡ **异步处理**: 高性能的异步批处理和并发处理
 - 🏗️ **模块化设计**: 完全模块化的架构，易于扩展和维护
-- 📊 **向量存储**: 使用Qdrant作为高性能向量数据库
+- 📊 **向量存储**: 支持Qdrant和Milvus作为高性能向量数据库
 
 ## 架构组件
 
@@ -44,7 +44,9 @@ cd wally_qin
 pip install -r requirements.txt
 ```
 
-### 2. 启动Qdrant
+### 2. 启动向量数据库
+
+#### 选项A: 使用Qdrant (默认)
 
 使用Docker启动Qdrant向量数据库：
 
@@ -65,6 +67,26 @@ services:
       - ./qdrant_storage:/qdrant/storage
 ```
 
+#### 选项B: 使用Milvus
+
+使用Docker Compose启动Milvus：
+
+```bash
+# 下载Milvus配置文件
+wget https://github.com/milvus-io/milvus/releases/download/v2.3.0/milvus-standalone-docker-compose.yml -O docker-compose.yml
+
+# 启动Milvus
+docker-compose up -d
+```
+
+或者单独运行：
+
+```bash
+docker run -p 19530:19530 -p 9091:9091 \
+  -v /path/to/milvus:/var/lib/milvus \
+  milvusdb/milvus:latest
+```
+
 ### 3. 配置环境
 
 创建`.env`文件：
@@ -76,9 +98,16 @@ OPENAI_API_KEY=your-openai-api-key
 # Ollama配置 (可选)
 OLLAMA_BASE_URL=http://localhost:11434
 
+# 向量数据库配置 (选择一种)
 # Qdrant配置
 QDRANT_URL=http://localhost:6333
 QDRANT_API_KEY=  # 可选
+
+# Milvus配置
+MILVUS_HOST=localhost
+MILVUS_PORT=19530
+MILVUS_USER=  # 可选
+MILVUS_PASSWORD=  # 可选
 ```
 
 ## 快速开始
@@ -132,6 +161,20 @@ config = {
 }
 ```
 
+### 使用Milvus
+
+```python
+config = {
+    "enabled": True,
+    "embedder_provider": "openai",
+    "openai_api_key": "your-api-key",
+    "vector_store": "milvus",
+    "milvus_host": "localhost",
+    "milvus_port": "19530",
+    "search_min_score": 0.7
+}
+```
+
 ## 详细使用说明
 
 ### 配置选项
@@ -140,11 +183,16 @@ config = {
 |------|------|--------|------|
 | `enabled` | bool | true | 是否启用代码索引 |
 | `embedder_provider` | str | "openai" | 嵌入器提供商 |
+| `vector_store` | str | "qdrant" | 向量数据库类型 (qdrant/milvus) |
 | `openai_api_key` | str | - | OpenAI API密钥 |
 | `ollama_base_url` | str | "http://localhost:11434" | Ollama服务地址 |
 | `model_id` | str | - | 模型ID |
 | `qdrant_url` | str | "http://localhost:6333" | Qdrant服务地址 |
 | `qdrant_api_key` | str | - | Qdrant API密钥 |
+| `milvus_host` | str | "localhost" | Milvus服务器地址 |
+| `milvus_port` | str | "19530" | Milvus服务器端口 |
+| `milvus_user` | str | - | Milvus用户名 (可选) |
+| `milvus_password` | str | - | Milvus密码 (可选) |
 | `search_min_score` | float | 0.7 | 搜索最小相似度 |
 | `search_max_results` | int | 100 | 搜索最大结果数 |
 
@@ -267,19 +315,26 @@ await manager.start_indexing()
    确保Qdrant服务正在运行: docker run -p 6333:6333 qdrant/qdrant
    ```
 
-2. **OpenAI API错误**
+2. **Milvus连接失败**
+   ```
+   确保Milvus服务正在运行
+   检查端口19530是否可访问
+   验证用户名和密码（如果设置了认证）
+   ```
+
+3. **OpenAI API错误**
    ```
    检查API密钥是否正确设置
    确认账户有足够的使用额度
    ```
 
-3. **Ollama连接失败**
+4. **Ollama连接失败**
    ```
    确保Ollama服务运行: ollama serve
    检查模型是否已下载: ollama pull nomic-embed-text
    ```
 
-4. **内存不足**
+5. **内存不足**
    ```
    减少批处理大小和并发数
    限制索引的文件类型和大小
