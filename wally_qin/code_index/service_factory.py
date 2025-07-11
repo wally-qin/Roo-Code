@@ -12,7 +12,7 @@ from .managers.config_manager import CodeIndexConfigManager
 from .managers.cache_manager import CacheManager
 from .embedders import OpenAIEmbedder, OllamaEmbedder
 from .vector_store import QdrantVectorStore, MilvusVectorStore, ChromaVectorStore
-from .processors import CodeParser
+from .processors import CodeParser, DirectoryScanner, FileWatcher
 from .constants import EMBEDDING_MODELS
 
 logger = logging.getLogger(__name__)
@@ -53,11 +53,11 @@ class CodeIndexServiceFactory:
         # 创建代码解析器
         parser = self._create_code_parser()
         
-        # 创建目录扫描器 (简化版本)
-        scanner = None  # 这里可以根据需要实现完整的扫描器
+        # 创建目录扫描器
+        scanner = self._create_directory_scanner(parser, embedder, vector_store)
         
-        # 创建文件监听器 (简化版本)
-        file_watcher = None  # 这里可以根据需要实现完整的文件监听器
+        # 创建文件监听器
+        file_watcher = self._create_file_watcher(parser, embedder, vector_store)
         
         return {
             "embedder": embedder,
@@ -128,6 +128,25 @@ class CodeIndexServiceFactory:
     def _create_code_parser(self) -> ICodeParser:
         """创建代码解析器实例"""
         return CodeParser()
+        
+    def _create_directory_scanner(self, parser: ICodeParser, embedder: IEmbedder, vector_store: IVectorStore) -> DirectoryScanner:
+        """创建目录扫描器实例"""
+        return DirectoryScanner(
+            parser=parser,
+            embedder=embedder,
+            vector_store=vector_store,
+            cache_manager=self.cache_manager
+        )
+        
+    def _create_file_watcher(self, parser: ICodeParser, embedder: IEmbedder, vector_store: IVectorStore) -> FileWatcher:
+        """创建文件监听器实例"""
+        return FileWatcher(
+            workspace_path=self.workspace_path,
+            parser=parser,
+            embedder=embedder,
+            vector_store=vector_store,
+            cache_manager=self.cache_manager
+        )
         
     def _get_vector_size(self, config, embedder: IEmbedder) -> int:
         """获取向量维度"""

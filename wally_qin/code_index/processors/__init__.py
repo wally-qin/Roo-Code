@@ -5,5 +5,6 @@
 
 from .code_parser import CodeParser
 from .directory_scanner import DirectoryScanner
+from .file_watcher import FileWatcher
 
-__all__ = ["CodeParser", "DirectoryScanner"]
+__all__ = ["CodeParser", "DirectoryScanner", "FileWatcher"]
