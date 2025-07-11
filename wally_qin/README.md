@@ -15,7 +15,7 @@
 - 📁 **增量索引**: 智能检测文件变化，只处理修改过的文件
 - ⚡ **异步处理**: 高性能的异步批处理和并发处理
 - 🏗️ **模块化设计**: 完全模块化的架构，易于扩展和维护
-- 📊 **向量存储**: 支持Qdrant和Milvus作为高性能向量数据库
+- 📊 **向量存储**: 支持Qdrant、Milvus和Chroma作为高性能向量数据库
 
 ## 架构组件
 
@@ -87,6 +87,30 @@ docker run -p 19530:19530 -p 9091:9091 \
   milvusdb/milvus:latest
 ```
 
+#### 选项C: 使用Chroma
+
+Chroma支持多种运行模式：
+
+1. **内存模式** (无需额外配置，数据不持久化)
+2. **持久化模式** (本地文件系统存储)
+3. **客户端-服务器模式** (需要启动Chroma服务器)
+
+启动Chroma服务器 (可选):
+
+```bash
+# 安装Chroma服务器
+pip install chromadb[server]
+
+# 启动服务器
+chroma run --host localhost --port 8000
+```
+
+或使用Docker：
+
+```bash
+docker run -p 8000:8000 chromadb/chroma:latest
+```
+
 ### 3. 配置环境
 
 创建`.env`文件：
@@ -108,6 +132,11 @@ MILVUS_HOST=localhost
 MILVUS_PORT=19530
 MILVUS_USER=  # 可选
 MILVUS_PASSWORD=  # 可选
+
+# Chroma配置
+CHROMA_HOST=localhost  # 可选，用于客户端-服务器模式
+CHROMA_PORT=8000  # 可选，用于客户端-服务器模式
+CHROMA_PERSIST_DIRECTORY=/path/to/chroma/data  # 可选，用于持久化模式
 ```
 
 ## 快速开始
@@ -175,6 +204,40 @@ config = {
 }
 ```
 
+### 使用Chroma
+
+```python
+# 持久化模式
+config = {
+    "enabled": True,
+    "embedder_provider": "openai",
+    "openai_api_key": "your-api-key",
+    "vector_store": "chroma",
+    "chroma_persist_directory": "/path/to/chroma/data",
+    "search_min_score": 0.7
+}
+
+# 客户端-服务器模式
+config = {
+    "enabled": True,
+    "embedder_provider": "openai",
+    "openai_api_key": "your-api-key",
+    "vector_store": "chroma",
+    "chroma_host": "localhost",
+    "chroma_port": 8000,
+    "search_min_score": 0.7
+}
+
+# 内存模式 (默认)
+config = {
+    "enabled": True,
+    "embedder_provider": "openai",
+    "openai_api_key": "your-api-key",
+    "vector_store": "chroma",
+    "search_min_score": 0.7
+}
+```
+
 ## 详细使用说明
 
 ### 配置选项
@@ -183,7 +246,7 @@ config = {
 |------|------|--------|------|
 | `enabled` | bool | true | 是否启用代码索引 |
 | `embedder_provider` | str | "openai" | 嵌入器提供商 |
-| `vector_store` | str | "qdrant" | 向量数据库类型 (qdrant/milvus) |
+| `vector_store` | str | "qdrant" | 向量数据库类型 (qdrant/milvus/chroma) |
 | `openai_api_key` | str | - | OpenAI API密钥 |
 | `ollama_base_url` | str | "http://localhost:11434" | Ollama服务地址 |
 | `model_id` | str | - | 模型ID |
@@ -193,6 +256,9 @@ config = {
 | `milvus_port` | str | "19530" | Milvus服务器端口 |
 | `milvus_user` | str | - | Milvus用户名 (可选) |
 | `milvus_password` | str | - | Milvus密码 (可选) |
+| `chroma_host` | str | - | Chroma服务器地址 (客户端-服务器模式) |
+| `chroma_port` | int | 8000 | Chroma服务器端口 (客户端-服务器模式) |
+| `chroma_persist_directory` | str | - | Chroma持久化目录 (持久化模式) |
 | `search_min_score` | float | 0.7 | 搜索最小相似度 |
 | `search_max_results` | int | 100 | 搜索最大结果数 |
 
@@ -334,10 +400,18 @@ await manager.start_indexing()
    检查模型是否已下载: ollama pull nomic-embed-text
    ```
 
-5. **内存不足**
+5. **Chroma连接失败**
+   ```
+   客户端-服务器模式: 确保Chroma服务器正在运行
+   持久化模式: 检查目录权限和磁盘空间
+   内存模式: 检查可用内存是否足够
+   ```
+
+6. **内存不足**
    ```
    减少批处理大小和并发数
    限制索引的文件类型和大小
+   使用Chroma持久化模式而不是内存模式
    ```
 
 ### 日志配置

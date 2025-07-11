@@ -233,6 +233,9 @@ class CodeIndexConfig:
     milvus_port: Optional[str] = None
     milvus_user: Optional[str] = None
     milvus_password: Optional[str] = None
+    chroma_host: Optional[str] = None
+    chroma_port: Optional[int] = None
+    chroma_persist_directory: Optional[str] = None
     search_min_score: Optional[float] = None
     search_max_results: Optional[int] = None
 
@@ -256,3 +259,6 @@ class ConfigSnapshot:
     milvus_port: str
     milvus_user: str
     milvus_password: str
+    chroma_host: str
+    chroma_port: str
+    chroma_persist_directory: str
