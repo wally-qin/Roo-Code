@@ -11,7 +11,7 @@ from .interfaces import IEmbedder, IVectorStore, ICodeParser
 from .managers.config_manager import CodeIndexConfigManager
 from .managers.cache_manager import CacheManager
 from .embedders import OpenAIEmbedder, OllamaEmbedder
-from .vector_store import QdrantVectorStore, MilvusVectorStore
+from .vector_store import QdrantVectorStore, MilvusVectorStore, ChromaVectorStore
 from .processors import CodeParser
 from .constants import EMBEDDING_MODELS
 
@@ -113,6 +113,14 @@ class CodeIndexServiceFactory:
                 vector_size=vector_size,
                 user=milvus_config["user"],
                 password=milvus_config["password"]
+            )
+        elif vector_store_type == "chroma":
+            return ChromaVectorStore(
+                workspace_path=self.workspace_path,
+                persist_directory=config.chroma_persist_directory,
+                host=config.chroma_host,
+                port=config.chroma_port,
+                vector_size=vector_size
             )
         else:
             raise ValueError(f"不支持的向量存储类型: {vector_store_type}")
