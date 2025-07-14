@@ -45,7 +45,7 @@ class CacheManager:
         except Exception:
             pass
             
-    def get_hash(self, file_path: str) -> Optional[str]:
+    async def get_hash(self, file_path: str) -> Optional[str]:
         """获取文件哈希"""
         return self.cache.get(file_path)
         
