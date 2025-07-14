@@ -1,136 +1,324 @@
 """
-文件监听器
+文件监听器实现
 
-监控工作空间中的文件变化，自动更新代码索引。
-基于原TypeScript项目的FileWatcher重新实现。
+基于原TypeScript项目的FileWatcher类重新实现，
+支持文件系统事件监听、批处理文件变更和自动索引更新。
 """
 
-import asyncio
 import os
-import time
-from typing import Optional, Dict, Any, List, Set
+import hashlib
+import asyncio
+from typing import Dict, List, Optional, Set, Callable, Any
 import logging
+from pathlib import Path
+import fnmatch
+import time
+import threading
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileSystemEvent
+from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileCreatedEvent, FileDeletedEvent
 
-from ..interfaces import IFileWatcher, ICodeParser, IEmbedder, IVectorStore, FileProcessingResult, PointStruct
-from ..constants import SUPPORTED_EXTENSIONS, BATCH_PROCESSING_DELAY, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE
+from ..interfaces import (
+    IFileWatcher, ICodeParser, IEmbedder, IVectorStore,
+    FileProcessingResult, BatchProcessingSummary, PointStruct, CodeBlock
+)
+from ..managers.cache_manager import CacheManager
+from ..constants import (
+    MAX_FILE_SIZE_BYTES, BATCH_SEGMENT_THRESHOLD, MAX_BATCH_RETRIES,
+    INITIAL_RETRY_DELAY_MS, SUPPORTED_EXTENSIONS, BATCH_PROCESSING_DELAY
+)
 
 logger = logging.getLogger(__name__)
-
-
-class CodeFileEventHandler(FileSystemEventHandler):
-    """代码文件事件处理器"""
-    
-    def __init__(self, file_watcher: 'FileWatcher'):
-        self.file_watcher = file_watcher
-        
-    def on_any_event(self, event: FileSystemEvent):
-        """处理任何文件系统事件"""
-        if event.is_directory:
-            return
-            
-        file_path = event.src_path
-        
-        # 检查是否是支持的文件类型
-        if not self.file_watcher._has_supported_extension(file_path):
-            return
-            
-        # 添加到待处理队列
-        self.file_watcher._add_to_processing_queue(file_path, event.event_type)
 
 
 class FileWatcher(IFileWatcher):
     """文件监听器实现"""
     
-    def __init__(self, workspace_path: str, parser: ICodeParser, 
-                 embedder: IEmbedder, vector_store: IVectorStore, cache_manager):
+    def __init__(self, workspace_path: str, cache_manager: CacheManager,
+                 code_parser: Optional[ICodeParser] = None,
+                 embedder: Optional[IEmbedder] = None,
+                 vector_store: Optional[IVectorStore] = None,
+                 ignore_patterns: Optional[List[str]] = None):
         """
         初始化文件监听器
         
         Args:
             workspace_path: 工作空间路径
-            parser: 代码解析器
+            cache_manager: 缓存管理器
+            code_parser: 代码解析器
             embedder: 嵌入器
             vector_store: 向量存储
-            cache_manager: 缓存管理器
+            ignore_patterns: 忽略模式列表
         """
-        self.workspace_path = workspace_path
-        self.parser = parser
+        self.workspace_path = os.path.abspath(workspace_path)
+        self.cache_manager = cache_manager
+        self.code_parser = code_parser
         self.embedder = embedder
         self.vector_store = vector_store
-        self.cache_manager = cache_manager
+        self.ignore_patterns = ignore_patterns or [
+            '*.pyc', '__pycache__', '.git', '.svn', '.hg',
+            'node_modules', '.env', '*.log', '*.tmp'
+        ]
         
-        # 监听器组件
+        # 文件系统监听器
         self.observer: Optional[Observer] = None
-        self.event_handler: Optional[CodeFileEventHandler] = None
+        self.event_handler: Optional['FileChangeHandler'] = None
         
-        # 事件系统
-        self._batch_start_event = asyncio.Event()
-        self._batch_progress_event = asyncio.Event()
-        self._batch_complete_event = asyncio.Event()
+        # 批处理相关
+        self.accumulated_events: Dict[str, Dict[str, Any]] = {}
+        self.batch_timer: Optional[threading.Timer] = None
+        self.batch_lock = asyncio.Lock()
+        self.is_watching = False
         
-        # 处理队列和状态
-        self._processing_queue: Dict[str, str] = {}  # file_path -> event_type
-        self._processing_task: Optional[asyncio.Task] = None
-        self._is_processing = False
-        self._last_activity_time = 0
+        # 事件处理
+        self._on_batch_start = asyncio.Event()
+        self._on_batch_progress = asyncio.Event()
+        self._on_batch_complete = asyncio.Event()
         
+        # 批处理延迟（秒）
+        self.BATCH_DEBOUNCE_DELAY = BATCH_PROCESSING_DELAY
+        self.FILE_PROCESSING_CONCURRENCY_LIMIT = 10
+        
+    async def initialize(self) -> None:
+        """初始化文件监听器"""
+        if not os.path.exists(self.workspace_path):
+            raise ValueError(f"工作空间路径不存在: {self.workspace_path}")
+            
+        # 创建事件处理器
+        self.event_handler = FileChangeHandler(self)
+        
+        # 创建观察者
+        self.observer = Observer()
+        self.observer.schedule(
+            self.event_handler,
+            self.workspace_path,
+            recursive=True
+        )
+        
+        logger.info(f"文件监听器已初始化，监听路径: {self.workspace_path}")
+        
+    def start_watching(self) -> None:
+        """开始监听文件变化"""
+        if not self.observer:
+            raise RuntimeError("文件监听器未初始化")
+            
+        if not self.is_watching:
+            self.observer.start()
+            self.is_watching = True
+            logger.info("文件监听器已启动")
+            
+    def stop_watching(self) -> None:
+        """停止监听文件变化"""
+        if self.observer and self.is_watching:
+            self.observer.stop()
+            self.observer.join()
+            self.is_watching = False
+            
+            # 取消批处理定时器
+            if self.batch_timer:
+                self.batch_timer.cancel()
+                self.batch_timer = None
+                
+            logger.info("文件监听器已停止")
+            
     @property
     def on_batch_start(self) -> asyncio.Event:
         """批处理开始事件"""
-        return self._batch_start_event
+        return self._on_batch_start
         
     @property
     def on_batch_progress(self) -> asyncio.Event:
         """批处理进度事件"""
-        return self._batch_progress_event
+        return self._on_batch_progress
         
     @property
     def on_batch_complete(self) -> asyncio.Event:
         """批处理完成事件"""
-        return self._batch_complete_event
+        return self._on_batch_complete
         
-    async def initialize(self) -> None:
-        """初始化文件监听器"""
+    async def handle_file_event(self, event_type: str, file_path: str) -> None:
+        """处理文件事件"""
+        if not self._should_process_file(file_path):
+            return
+            
+        # 记录事件
+        async with self.batch_lock:
+            self.accumulated_events[file_path] = {
+                'type': event_type,
+                'timestamp': time.time(),
+                'path': file_path
+            }
+            
+        # 调度批处理
+        self._schedule_batch_processing()
+        
+    def _should_process_file(self, file_path: str) -> bool:
+        """检查是否应该处理文件"""
+        # 检查文件扩展名
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            return False
+            
+        # 检查忽略模式
+        filename = os.path.basename(file_path)
+        for pattern in self.ignore_patterns:
+            if fnmatch.fnmatch(filename, pattern):
+                return False
+                
+        # 检查是否在忽略的目录中
+        ignored_dirs = {'.git', '.svn', '.hg', '__pycache__', 'node_modules'}
+        path_parts = Path(file_path).parts
+        if any(part in ignored_dirs for part in path_parts):
+            return False
+            
+        return True
+        
+    def _schedule_batch_processing(self) -> None:
+        """调度批处理"""
+        # 取消之前的定时器
+        if self.batch_timer:
+            self.batch_timer.cancel()
+            
+        # 创建新的定时器
+        self.batch_timer = threading.Timer(
+            self.BATCH_DEBOUNCE_DELAY,
+            self._trigger_batch_processing
+        )
+        self.batch_timer.start()
+        
+    def _trigger_batch_processing(self) -> None:
+        """触发批处理"""
+        # 在新的事件循环中运行异步批处理
         try:
-            # 创建事件处理器
-            self.event_handler = CodeFileEventHandler(self)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._process_batch())
+            loop.close()
+        except Exception as error:
+            logger.error(f"批处理执行错误: {error}")
             
-            # 创建观察者
-            self.observer = Observer()
-            self.observer.schedule(
-                self.event_handler,
-                self.workspace_path,
-                recursive=True
-            )
+    async def _process_batch(self) -> None:
+        """处理批量文件变更"""
+        async with self.batch_lock:
+            if not self.accumulated_events:
+                return
+                
+            # 复制事件并清空累积器
+            events_to_process = self.accumulated_events.copy()
+            self.accumulated_events.clear()
             
-            # 启动批处理任务
-            self._processing_task = asyncio.create_task(self._batch_processing_loop())
+        logger.info(f"开始处理批次: {len(events_to_process)} 个文件")
+        
+        # 触发批处理开始事件
+        self._on_batch_start.set()
+        self._on_batch_start.clear()
+        
+        # 分类事件
+        files_to_delete = []
+        files_to_upsert = []
+        
+        for file_path, event_info in events_to_process.items():
+            if event_info['type'] == 'delete':
+                files_to_delete.append(file_path)
+            else:  # create or modify
+                files_to_upsert.append((file_path, event_info))
+                
+        batch_results: List[FileProcessingResult] = []
+        processed_count = 0
+        total_count = len(events_to_process)
+        
+        # 处理删除
+        if files_to_delete and self.vector_store:
+            try:
+                await self.vector_store.delete_points_by_multiple_file_paths(files_to_delete)
+                for file_path in files_to_delete:
+                    await self.cache_manager.remove_hash(file_path)
+                    batch_results.append(FileProcessingResult(
+                        path=file_path,
+                        status="success",
+                        reason="File deleted from index"
+                    ))
+                    processed_count += 1
+                    
+                logger.info(f"删除了 {len(files_to_delete)} 个文件的索引")
+            except Exception as error:
+                logger.error(f"批量删除失败: {error}")
+                for file_path in files_to_delete:
+                    batch_results.append(FileProcessingResult(
+                        path=file_path,
+                        status="error",
+                        error=error
+                    ))
+                    
+        # 处理创建和修改
+        if files_to_upsert:
+            # 并发处理文件
+            semaphore = asyncio.Semaphore(self.FILE_PROCESSING_CONCURRENCY_LIMIT)
+            tasks = []
             
-            logger.info("文件监听器初始化完成")
+            for file_path, event_info in files_to_upsert:
+                task = asyncio.create_task(
+                    self._process_file_with_semaphore(semaphore, file_path)
+                )
+                tasks.append(task)
+                
+            # 等待所有任务完成
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             
-        except Exception as e:
-            logger.error(f"文件监听器初始化失败: {e}")
-            raise
+            # 收集结果
+            points_to_upsert = []
+            successful_files = []
             
-    def start_watching(self) -> None:
-        """开始监听文件变化"""
-        if self.observer and not self.observer.is_alive():
-            self.observer.start()
-            logger.info("文件监听器已启动")
-        else:
-            logger.warning("文件监听器已在运行或未初始化")
-            
-    def stop_watching(self) -> None:
-        """停止监听文件变化"""
-        if self.observer and self.observer.is_alive():
-            self.observer.stop()
-            self.observer.join()
-            logger.info("文件监听器已停止")
-            
-        if self._processing_task and not self._processing_task.done():
-            self._processing_task.cancel()
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error(f"文件处理异常: {result}")
+                    continue
+                    
+                batch_results.append(result)
+                processed_count += 1
+                
+                if (result.status == "processed_for_batching" and 
+                    result.points_to_upsert):
+                    points_to_upsert.extend(result.points_to_upsert)
+                    successful_files.append({
+                        'path': result.path,
+                        'new_hash': result.new_hash
+                    })
+                    
+            # 批量上传向量
+            if points_to_upsert and self.vector_store:
+                try:
+                    await self.vector_store.upsert_points(points_to_upsert)
+                    
+                    # 更新缓存
+                    for file_info in successful_files:
+                        await self.cache_manager.update_hash(
+                            file_info['path'], file_info['new_hash']
+                        )
+                        
+                    logger.info(f"成功上传 {len(points_to_upsert)} 个向量点")
+                except Exception as error:
+                    logger.error(f"批量上传失败: {error}")
+                    
+        # 报告进度
+        self._on_batch_progress.set()
+        self._on_batch_progress.clear()
+        
+        # 触发批处理完成事件
+        summary = BatchProcessingSummary(
+            processed_files=batch_results,
+            batch_error=None
+        )
+        
+        self._on_batch_complete.set()
+        self._on_batch_complete.clear()
+        
+        logger.info(f"批处理完成: 处理了 {processed_count}/{total_count} 个文件")
+        
+    async def _process_file_with_semaphore(self, semaphore: asyncio.Semaphore, 
+                                         file_path: str) -> FileProcessingResult:
+        """使用信号量控制并发处理文件"""
+        async with semaphore:
+            return await self.process_file(file_path)
             
     async def process_file(self, file_path: str) -> FileProcessingResult:
         """
@@ -145,222 +333,144 @@ class FileWatcher(IFileWatcher):
         try:
             # 检查文件是否存在
             if not os.path.exists(file_path):
-                # 文件被删除，从索引中移除
-                await self.vector_store.delete_points_by_file_path(file_path)
-                await self.cache_manager.remove_from_cache(file_path)
-                
-                return FileProcessingResult(
-                    path=file_path,
-                    status="success",
-                    reason="文件已删除，从索引中移除"
-                )
-                
-            # 检查文件是否支持
-            if not self._has_supported_extension(file_path):
                 return FileProcessingResult(
                     path=file_path,
                     status="skipped",
-                    reason="不支持的文件类型"
+                    reason="File does not exist"
                 )
                 
-            # 计算文件哈希
-            file_hash = await self._calculate_file_hash(file_path)
-            
-            # 检查缓存
-            if await self.cache_manager.is_file_cached(file_path, file_hash):
+            # 检查文件大小
+            file_size = os.path.getsize(file_path)
+            if file_size > MAX_FILE_SIZE_BYTES:
                 return FileProcessingResult(
                     path=file_path,
                     status="skipped",
-                    reason="文件未发生变化"
+                    reason="File is too large"
                 )
                 
-            # 删除旧的索引数据
-            await self.vector_store.delete_points_by_file_path(file_path)
-            
-            # 解析文件
-            code_blocks = await self.parser.parse_file(file_path, file_hash=file_hash)
-            
-            if not code_blocks:
-                # 更新缓存但不创建索引
-                await self.cache_manager.cache_file(file_path, file_hash)
-                return FileProcessingResult(
-                    path=file_path,
-                    status="success",
-                    reason="文件无有效代码块"
-                )
-                
-            # 过滤有效代码块
-            valid_blocks = [
-                block for block in code_blocks
-                if MIN_CHUNK_SIZE <= len(block.content) <= MAX_CHUNK_SIZE
-            ]
-            
-            if not valid_blocks:
-                await self.cache_manager.cache_file(file_path, file_hash)
-                return FileProcessingResult(
-                    path=file_path,
-                    status="success",
-                    reason="无有效代码块"
-                )
-                
-            # 生成嵌入向量点
-            points = await self._create_embedding_points(valid_blocks)
-            
-            # 插入向量存储
-            await self.vector_store.upsert_points(points)
-            
-            # 更新缓存
-            await self.cache_manager.cache_file(file_path, file_hash)
-            
-            return FileProcessingResult(
-                path=file_path,
-                status="success",
-                new_hash=file_hash,
-                points_to_upsert=points
-            )
-            
-        except Exception as e:
-            logger.error(f"处理文件失败 {file_path}: {e}")
-            return FileProcessingResult(
-                path=file_path,
-                status="error",
-                error=e,
-                reason=str(e)
-            )
-            
-    def _add_to_processing_queue(self, file_path: str, event_type: str):
-        """添加文件到处理队列"""
-        self._processing_queue[file_path] = event_type
-        self._last_activity_time = time.time()
-        
-    async def _batch_processing_loop(self):
-        """批处理循环"""
-        while True:
+            # 读取文件内容
             try:
-                await asyncio.sleep(0.5)  # 检查间隔
-                
-                # 检查是否有待处理的文件
-                if not self._processing_queue:
-                    continue
-                    
-                # 检查是否达到批处理延迟
-                current_time = time.time()
-                if current_time - self._last_activity_time < BATCH_PROCESSING_DELAY:
-                    continue
-                    
-                # 避免重复处理
-                if self._is_processing:
-                    continue
-                    
-                # 开始批处理
-                await self._process_queued_files()
-                
-            except asyncio.CancelledError:
-                logger.info("批处理循环已取消")
-                break
-            except Exception as e:
-                logger.error(f"批处理循环错误: {e}")
-                await asyncio.sleep(1)  # 错误时稍作等待
-                
-    async def _process_queued_files(self):
-        """处理队列中的文件"""
-        if not self._processing_queue:
-            return
-            
-        self._is_processing = True
-        
-        try:
-            # 触发批处理开始事件
-            self._batch_start_event.set()
-            self._batch_start_event.clear()
-            
-            # 获取待处理文件列表
-            files_to_process = list(self._processing_queue.keys())
-            self._processing_queue.clear()
-            
-            logger.info(f"开始批处理 {len(files_to_process)} 个文件")
-            
-            # 逐个处理文件
-            for file_path in files_to_process:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            except UnicodeDecodeError:
                 try:
-                    result = await self.process_file(file_path)
-                    logger.debug(f"处理文件结果: {file_path} -> {result.status}")
-                    
-                    # 触发进度事件
-                    self._batch_progress_event.set()
-                    self._batch_progress_event.clear()
-                    
+                    with open(file_path, 'r', encoding='latin-1') as f:
+                        content = f.read()
                 except Exception as e:
-                    logger.error(f"处理文件失败 {file_path}: {e}")
+                    return FileProcessingResult(
+                        path=file_path,
+                        status="error",
+                        error=e
+                    )
                     
-            # 触发批处理完成事件
-            self._batch_complete_event.set()
-            self._batch_complete_event.clear()
+            # 计算文件哈希
+            new_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()
             
-            logger.info(f"批处理完成，处理了 {len(files_to_process)} 个文件")
-            
-        finally:
-            self._is_processing = False
-            
-    def _has_supported_extension(self, file_path: str) -> bool:
-        """检查文件是否有支持的扩展名"""
-        _, ext = os.path.splitext(file_path.lower())
-        return ext in SUPPORTED_EXTENSIONS
-        
-    async def _calculate_file_hash(self, file_path: str) -> str:
-        """计算文件哈希"""
-        try:
-            import hashlib
-            hash_obj = hashlib.md5()
-            
-            def read_file():
-                with open(file_path, 'rb') as f:
-                    for chunk in iter(lambda: f.read(4096), b""):
-                        hash_obj.update(chunk)
-                return hash_obj.hexdigest()
+            # 检查文件是否已更改
+            cached_hash = await self.cache_manager.get_hash(file_path)
+            if cached_hash == new_hash:
+                return FileProcessingResult(
+                    path=file_path,
+                    status="skipped",
+                    reason="File has not changed"
+                )
                 
-            return await asyncio.to_thread(read_file)
+            # 解析文件（如果有解析器）
+            if not self.code_parser:
+                return FileProcessingResult(
+                    path=file_path,
+                    status="skipped",
+                    reason="No code parser available"
+                )
+                
+            blocks = await self.code_parser.parse_file(file_path, content, new_hash)
             
-        except Exception:
-            return ""
+            # 准备向量点（如果有嵌入器）
+            points_to_upsert = []
+            if self.embedder and blocks:
+                texts = [block.content for block in blocks]
+                embedding_response = await self.embedder.create_embeddings(texts)
+                embeddings = embedding_response.embeddings
+                
+                for i, (block, embedding) in enumerate(zip(blocks, embeddings)):
+                    point_id = self._generate_point_id(block)
+                    point = PointStruct(
+                        id=point_id,
+                        vector=embedding,
+                        payload={
+                            'file_path': block.file_path,
+                            'identifier': block.identifier,
+                            'type': block.type,
+                            'start_line': block.start_line,
+                            'end_line': block.end_line,
+                            'content': block.content,
+                            'file_hash': block.file_hash,
+                            'segment_hash': block.segment_hash,
+                            'workspace_path': self.workspace_path
+                        }
+                    )
+                    points_to_upsert.append(point)
+                    
+            return FileProcessingResult(
+                path=file_path,
+                status="processed_for_batching",
+                new_hash=new_hash,
+                points_to_upsert=points_to_upsert
+            )
             
-    async def _create_embedding_points(self, code_blocks: List) -> List[PointStruct]:
-        """为代码块创建嵌入向量点"""
-        points = []
+        except Exception as error:
+            return FileProcessingResult(
+                path=file_path,
+                status="local_error",
+                error=error
+            )
+            
+    def _generate_point_id(self, block: CodeBlock) -> str:
+        """为代码块生成唯一ID"""
+        id_string = f"{block.file_path}:{block.start_line}:{block.segment_hash}"
+        return hashlib.sha256(id_string.encode('utf-8')).hexdigest()[:16]
         
-        # 提取文本内容
-        texts = [block.content for block in code_blocks]
-        
-        # 批量生成嵌入
-        embedding_response = await self.embedder.create_embeddings(texts)
-        
-        # 创建向量点
-        for i, (block, embedding) in enumerate(zip(code_blocks, embedding_response.embeddings)):
-            point_id = f"{block.file_hash}_{i}"
-            
-            payload = {
-                "filePath": block.file_path,
-                "codeChunk": block.content,
-                "startLine": block.start_line,
-                "endLine": block.end_line,
-                "segmentHash": block.segment_hash,
-                "type": block.type,
-                "identifier": block.identifier
-            }
-            
-            points.append(PointStruct(
-                id=point_id,
-                vector=embedding,
-                payload=payload
-            ))
-            
-        return points
-        
-    async def get_queue_status(self) -> Dict[str, Any]:
-        """获取队列状态"""
+    async def get_watch_statistics(self) -> Dict[str, Any]:
+        """获取监听统计信息"""
         return {
-            "queue_size": len(self._processing_queue),
-            "is_processing": self._is_processing,
-            "observer_alive": self.observer.is_alive() if self.observer else False,
-            "queued_files": list(self._processing_queue.keys())
+            'is_watching': self.is_watching,
+            'workspace_path': self.workspace_path,
+            'accumulated_events': len(self.accumulated_events),
+            'batch_delay': self.BATCH_DEBOUNCE_DELAY,
+            'concurrency_limit': self.FILE_PROCESSING_CONCURRENCY_LIMIT
         }
+
+
+class FileChangeHandler(FileSystemEventHandler):
+    """文件系统事件处理器"""
+    
+    def __init__(self, file_watcher: FileWatcher):
+        """
+        初始化事件处理器
+        
+        Args:
+            file_watcher: 文件监听器实例
+        """
+        super().__init__()
+        self.file_watcher = file_watcher
+        
+    def on_created(self, event):
+        """文件创建事件"""
+        if not event.is_directory:
+            asyncio.create_task(
+                self.file_watcher.handle_file_event('create', event.src_path)
+            )
+            
+    def on_modified(self, event):
+        """文件修改事件"""
+        if not event.is_directory:
+            asyncio.create_task(
+                self.file_watcher.handle_file_event('change', event.src_path)
+            )
+            
+    def on_deleted(self, event):
+        """文件删除事件"""
+        if not event.is_directory:
+            asyncio.create_task(
+                self.file_watcher.handle_file_event('delete', event.src_path)
+            )

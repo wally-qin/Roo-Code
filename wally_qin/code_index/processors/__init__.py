@@ -1,10 +1,15 @@
-"""处理器模块
+"""
+处理器模块
 
-包含代码解析、目录扫描和文件监控等核心处理器。
+包含代码索引处理的核心组件：代码解析器、目录扫描器和文件监听器。
 """
 
 from .code_parser import CodeParser
 from .directory_scanner import DirectoryScanner
 from .file_watcher import FileWatcher
 
-__all__ = ["CodeParser", "DirectoryScanner", "FileWatcher"]
+__all__ = [
+    'CodeParser',
+    'DirectoryScanner', 
+    'FileWatcher'
+]

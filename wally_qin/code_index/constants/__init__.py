@@ -49,49 +49,15 @@ SUPPORTED_EXTENSIONS = {
     ".elm", ".ejs", ".erb"
 }
 
-# Tree-sitter 支持的语言映射
-LANGUAGE_EXTENSIONS = {
-    "python": [".py"],
-    "javascript": [".js", ".jsx"],
-    "typescript": [".ts", ".tsx", ".vue"],
-    "java": [".java"],
-    "go": [".go"],
-    "rust": [".rs"],
-    "c": [".c", ".h"],
-    "cpp": [".cpp", ".hpp"],
-    "c_sharp": [".cs"],
-    "ruby": [".rb"],
-    "php": [".php"],
-    "swift": [".swift"],
-    "kotlin": [".kt", ".kts"],
-    "elixir": [".ex", ".exs"],
-    "elisp": [".el"],
-    "html": [".html", ".htm"],
-    "css": [".css"],
-    "json": [".json"],
-    "ocaml": [".ml", ".mli"],
-    "lua": [".lua"],
-    "scala": [".scala"],
-    "toml": [".toml"],
-    "zig": [".zig"],
-    "elm": [".elm"],
-}
-
-# 向量数据库选项
-VECTOR_STORE_OPTIONS = ["qdrant", "milvus"]
-
 # 默认配置
 DEFAULT_CONFIG = {
+    "enabled": True,
     "embedder_provider": "openai",
-    "vector_store": "qdrant",  # 默认使用Qdrant
+    "model_id": "text-embedding-3-small",
+    "vector_store": "qdrant",
     "qdrant_url": "http://localhost:6333",
-    "milvus_host": "localhost",  # Milvus配置
-    "milvus_port": "19530",
-    "openai_model": "text-embedding-3-small",
     "search_min_score": DEFAULT_SEARCH_MIN_SCORE,
-    "search_max_results": DEFAULT_MAX_SEARCH_RESULTS,
-    "batch_size": BATCH_SEGMENT_THRESHOLD,
-    "max_file_size": MAX_FILE_SIZE_BYTES,
+    "search_max_results": DEFAULT_MAX_SEARCH_RESULTS
 }
 
 # 嵌入模型配置
@@ -99,13 +65,16 @@ EMBEDDING_MODELS = {
     "openai": {
         "text-embedding-3-small": {"dimension": 1536, "max_tokens": 8191},
         "text-embedding-3-large": {"dimension": 3072, "max_tokens": 8191},
-        "text-embedding-ada-002": {"dimension": 1536, "max_tokens": 8191},
+        "text-embedding-ada-002": {"dimension": 1536, "max_tokens": 8191}
+    },
+    "gemini": {
+        "text-embedding-004": {"dimension": 768, "max_tokens": 2048}
     },
     "ollama": {
         "nomic-embed-text": {"dimension": 768, "max_tokens": 8192},
-        "all-minilm": {"dimension": 384, "max_tokens": 256},
-    },
-    "gemini": {
-        "models/embedding-001": {"dimension": 768, "max_tokens": 2048},
+        "mxbai-embed-large": {"dimension": 1024, "max_tokens": 512}
     }
 }
+
+# 向量存储选项
+VECTOR_STORE_OPTIONS = ["qdrant", "milvus", "chroma"]

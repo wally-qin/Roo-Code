@@ -10,7 +10,7 @@ import logging
 from .interfaces import IEmbedder, IVectorStore, ICodeParser
 from .managers.config_manager import CodeIndexConfigManager
 from .managers.cache_manager import CacheManager
-from .embedders import OpenAIEmbedder, OllamaEmbedder
+from .embedders import OpenAIEmbedder, OllamaEmbedder, GeminiEmbedder, OpenAICompatibleEmbedder
 from .vector_store import QdrantVectorStore, MilvusVectorStore, ChromaVectorStore
 from .processors import CodeParser, DirectoryScanner, FileWatcher
 from .constants import EMBEDDING_MODELS
@@ -51,20 +51,20 @@ class CodeIndexServiceFactory:
         vector_store = self._create_vector_store(config, embedder)
         
         # 创建代码解析器
-        parser = self._create_code_parser()
+        code_parser = self._create_code_parser()
         
         # 创建目录扫描器
-        scanner = self._create_directory_scanner(parser, embedder, vector_store)
+        directory_scanner = self._create_directory_scanner(code_parser, embedder, vector_store)
         
         # 创建文件监听器
-        file_watcher = self._create_file_watcher(parser, embedder, vector_store)
+        file_watcher = self._create_file_watcher(code_parser, embedder, vector_store)
         
         return {
-            "embedder": embedder,
-            "vector_store": vector_store,
-            "parser": parser,
-            "scanner": scanner,
-            "file_watcher": file_watcher
+            'embedder': embedder,
+            'vector_store': vector_store,
+            'code_parser': code_parser,
+            'directory_scanner': directory_scanner,
+            'file_watcher': file_watcher
         }
         
     def _create_embedder(self, config) -> IEmbedder:
@@ -72,115 +72,155 @@ class CodeIndexServiceFactory:
         provider = config.embedder_provider.value
         
         if provider == "openai":
-            if not config.openai_api_key:
+            api_key = config.openai_api_key
+            if not api_key:
                 raise ValueError("OpenAI API密钥未配置")
-            return OpenAIEmbedder(
-                api_key=config.openai_api_key,
-                model_id=config.model_id
-            )
+            
+            model_id = config.model_id or "text-embedding-3-small"
+            return OpenAIEmbedder(api_key=api_key, model_id=model_id)
+            
         elif provider == "ollama":
-            if not config.ollama_base_url:
+            base_url = config.ollama_base_url
+            if not base_url:
                 raise ValueError("Ollama基础URL未配置")
-            return OllamaEmbedder(
-                base_url=config.ollama_base_url,
-                model_id=config.model_id
+            
+            model_id = config.model_id or "nomic-embed-text"
+            return OllamaEmbedder(base_url=base_url, model_id=model_id)
+            
+        elif provider == "gemini":
+            api_key = config.gemini_api_key
+            if not api_key:
+                raise ValueError("Gemini API密钥未配置")
+            
+            return GeminiEmbedder(api_key=api_key)
+            
+        elif provider == "openai-compatible":
+            base_url = config.openai_compatible_base_url
+            api_key = config.openai_compatible_api_key
+            
+            if not base_url or not api_key:
+                raise ValueError("OpenAI兼容API配置不完整")
+            
+            model_id = config.model_id or "text-embedding-3-small"
+            return OpenAICompatibleEmbedder(
+                base_url=base_url,
+                api_key=api_key,
+                model_id=model_id
             )
+            
         else:
-            raise ValueError(f"不支持的嵌入器类型: {provider}")
+            raise ValueError(f"不支持的嵌入器提供商: {provider}")
             
     def _create_vector_store(self, config, embedder: IEmbedder) -> IVectorStore:
         """创建向量存储实例"""
-        vector_store_type = self.config_manager.vector_store_type
-        
-        # 获取向量维度
+        vector_store_type = getattr(config, 'vector_store', 'qdrant')
         vector_size = self._get_vector_size(config, embedder)
         
         if vector_store_type == "qdrant":
-            if not config.qdrant_url:
-                raise ValueError("Qdrant URL未配置")
+            url = config.qdrant_url or "http://localhost:6333"
+            api_key = config.qdrant_api_key
+            
             return QdrantVectorStore(
-                workspace_path=self.workspace_path,
-                url=config.qdrant_url,
-                vector_size=vector_size,
-                api_key=config.qdrant_api_key
-            )
-        elif vector_store_type == "milvus":
-            milvus_config = self.config_manager.milvus_config
-            return MilvusVectorStore(
-                workspace_path=self.workspace_path,
-                host=milvus_config["host"],
-                port=milvus_config["port"],
-                vector_size=vector_size,
-                user=milvus_config["user"],
-                password=milvus_config["password"]
-            )
-        elif vector_store_type == "chroma":
-            return ChromaVectorStore(
-                workspace_path=self.workspace_path,
-                persist_directory=config.chroma_persist_directory,
-                host=config.chroma_host,
-                port=config.chroma_port,
+                url=url,
+                api_key=api_key,
+                collection_name="code_blocks",
                 vector_size=vector_size
             )
+            
+        elif vector_store_type == "milvus":
+            host = getattr(config, 'milvus_host', 'localhost')
+            port = getattr(config, 'milvus_port', 19530)
+            user = getattr(config, 'milvus_user', None)
+            password = getattr(config, 'milvus_password', None)
+            
+            return MilvusVectorStore(
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                collection_name="code_blocks",
+                vector_size=vector_size
+            )
+            
+        elif vector_store_type == "chroma":
+            host = getattr(config, 'chroma_host', 'localhost')
+            port = getattr(config, 'chroma_port', 8000)
+            persist_directory = getattr(config, 'chroma_persist_directory', None)
+            
+            return ChromaVectorStore(
+                host=host,
+                port=port,
+                persist_directory=persist_directory,
+                collection_name="code_blocks"
+            )
+            
         else:
             raise ValueError(f"不支持的向量存储类型: {vector_store_type}")
             
     def _create_code_parser(self) -> ICodeParser:
-        """创建代码解析器实例"""
+        """创建代码解析器"""
         return CodeParser()
         
     def _create_directory_scanner(self, parser: ICodeParser, embedder: IEmbedder, vector_store: IVectorStore) -> DirectoryScanner:
-        """创建目录扫描器实例"""
+        """创建目录扫描器"""
         return DirectoryScanner(
-            parser=parser,
             embedder=embedder,
             vector_store=vector_store,
+            code_parser=parser,
             cache_manager=self.cache_manager
         )
         
     def _create_file_watcher(self, parser: ICodeParser, embedder: IEmbedder, vector_store: IVectorStore) -> FileWatcher:
-        """创建文件监听器实例"""
+        """创建文件监听器"""
         return FileWatcher(
             workspace_path=self.workspace_path,
-            parser=parser,
+            cache_manager=self.cache_manager,
+            code_parser=parser,
             embedder=embedder,
-            vector_store=vector_store,
-            cache_manager=self.cache_manager
+            vector_store=vector_store
         )
         
     def _get_vector_size(self, config, embedder: IEmbedder) -> int:
         """获取向量维度"""
-        # 如果配置中指定了维度，使用配置的维度
-        if config.model_dimension:
+        # 如果配置中有明确的维度，优先使用
+        if hasattr(config, 'model_dimension') and config.model_dimension:
             return config.model_dimension
             
-        # 否则从嵌入器信息获取
-        if hasattr(embedder, 'get_model_dimension'):
-            return embedder.get_model_dimension()
-            
-        # 从模型配置获取默认维度
+        # 否则根据嵌入器类型推断
         provider = config.embedder_provider.value
         model_id = config.model_id
         
-        if provider in EMBEDDING_MODELS:
-            models = EMBEDDING_MODELS[provider]
-            if model_id and model_id in models:
-                return models[model_id]["dimension"]
+        if provider == "openai":
+            if model_id == "text-embedding-3-small":
+                return 1536
+            elif model_id == "text-embedding-3-large":
+                return 3072
+            elif model_id == "text-embedding-ada-002":
+                return 1536
             else:
-                # 使用该提供商的第一个模型的维度
-                first_model = list(models.values())[0]
-                return first_model["dimension"]
-        
-        # 默认维度
-        return 1536
+                return 1536  # 默认
+                
+        elif provider == "gemini":
+            return 768
+            
+        elif provider == "ollama":
+            # Ollama模型维度可能不同，默认1536
+            return 1536
+            
+        elif provider == "openai-compatible":
+            # 根据模型ID推断
+            if hasattr(embedder, 'get_model_dimension'):
+                return embedder.get_model_dimension()
+            return 1536
+            
+        return 1536  # 默认
         
     async def validate_embedder(self, embedder: IEmbedder) -> Dict[str, Any]:
         """验证嵌入器配置"""
         try:
             return await embedder.validate_configuration()
-        except Exception as e:
-            logger.error(f"嵌入器验证失败: {e}")
+        except Exception as error:
             return {
-                "valid": False,
-                "error": str(e)
+                'valid': False,
+                'error': str(error)
             }
