@@ -1,14 +1,15 @@
 """
-代码解析器实现
+代码解析器实现 (增强版)
 
 基于原TypeScript项目的CodeParser类重新实现，
 支持多种编程语言的代码解析和分块处理。
+完整迁移了TypeScript版本的tree-sitter查询。
 """
 
 import os
 import hashlib
 import re
-from typing import List, Optional, Set, Dict, Any
+from typing import List, Optional, Set, Dict, Any, Tuple
 import logging
 import asyncio
 import tree_sitter_python
@@ -19,13 +20,14 @@ import tree_sitter_go
 import tree_sitter_java
 import tree_sitter_cpp
 import tree_sitter_c
-from tree_sitter import Language, Parser, Node
+from tree_sitter import Language, Parser, Node, Query
 
 from ..interfaces import ICodeParser, CodeBlock
 from ..constants import (
     MAX_BLOCK_CHARS, MIN_BLOCK_CHARS, MIN_CHUNK_REMAINDER_CHARS,
     MAX_CHARS_TOLERANCE_FACTOR, SUPPORTED_EXTENSIONS
 )
+from .queries import get_query_for_language
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ class CodeParser(ICodeParser):
         self._init_tree_sitter_parsers()
         
     def _init_tree_sitter_parsers(self) -> None:
-        """初始化tree-sitter解析器"""
+        """初始化tree-sitter解析器 (增强版)"""
         try:
             # 创建语言解析器映射
             language_map = {
@@ -55,6 +57,8 @@ class CodeParser(ICodeParser):
                 'c': Language(tree_sitter_c.language()),
                 'h': Language(tree_sitter_c.language()),
                 'hpp': Language(tree_sitter_cpp.language()),
+                'cc': Language(tree_sitter_cpp.language()),
+                'cxx': Language(tree_sitter_cpp.language()),
             }
             
             # 为每种语言创建解析器
@@ -62,9 +66,20 @@ class CodeParser(ICodeParser):
                 parser = Parser()
                 parser.set_language(language)
                 
-                # 创建查询以捕获函数、类等结构
-                query_patterns = self._get_query_patterns(ext)
-                query = language.query(query_patterns) if query_patterns else None
+                # 使用完整的TypeScript迁移查询
+                query_pattern = get_query_for_language(ext)
+                query = None
+                
+                if query_pattern:
+                    try:
+                        query = language.query(query_pattern)
+                        logger.debug(f"Loaded tree-sitter query for {ext}: {len(query_pattern)} chars")
+                    except Exception as query_error:
+                        logger.warning(f"Failed to load query for {ext}: {query_error}")
+                        # 使用简化查询作为后备
+                        fallback_query = self._get_fallback_query(ext)
+                        if fallback_query:
+                            query = language.query(fallback_query)
                 
                 self.loaded_parsers[ext] = {
                     'parser': parser,
@@ -75,11 +90,11 @@ class CodeParser(ICodeParser):
         except Exception as error:
             logger.error(f"Error initializing tree-sitter parsers: {error}")
             
-    def _get_query_patterns(self, extension: str) -> Optional[str]:
-        """获取指定语言的查询模式"""
-        patterns = {
+    def _get_fallback_query(self, extension: str) -> Optional[str]:
+        """获取简化的后备查询模式"""
+        fallback_patterns = {
             'py': """
-                (function_def) @function
+                (function_definition) @function
                 (class_definition) @class
                 (async_function_def) @function
             """,
@@ -142,7 +157,7 @@ class CodeParser(ICodeParser):
             """
         }
         
-        return patterns.get(extension)
+        return fallback_patterns.get(extension)
         
     async def parse_file(self, file_path: str, content: Optional[str] = None, 
                         file_hash: Optional[str] = None) -> List[CodeBlock]:
@@ -226,11 +241,19 @@ class CodeParser(ICodeParser):
             
         results: List[CodeBlock] = []
         
+        # 组织查询结果：按节点分组captures
+        node_captures = {}
+        for node, capture_name in captures:
+            if node not in node_captures:
+                node_captures[node] = []
+            node_captures[node].append((node, capture_name))
+        
         # 处理捕获的节点
-        queue = [capture[0] for capture in captures]  # capture是(node, capture_name)元组
+        queue = list(node_captures.keys())
         
         while queue:
             current_node = queue.pop(0)
+            node_query_matches = node_captures.get(current_node, [])
             
             # 检查节点是否满足最小字符要求
             if len(current_node.text) >= MIN_BLOCK_CHARS:
@@ -238,7 +261,10 @@ class CodeParser(ICodeParser):
                 if len(current_node.text) > MAX_BLOCK_CHARS * MAX_CHARS_TOLERANCE_FACTOR:
                     if current_node.children:
                         # 如果有子节点，处理子节点
-                        queue.extend(child for child in current_node.children if child)
+                        for child in current_node.children:
+                            if child and child not in node_captures:
+                                queue.append(child)
+                                node_captures[child] = []
                     else:
                         # 如果是叶节点，进行分块
                         chunked_blocks = self._chunk_leaf_node_by_lines(
@@ -247,8 +273,8 @@ class CodeParser(ICodeParser):
                         results.extend(chunked_blocks)
                 else:
                     # 节点满足要求，创建代码块
-                    identifier = self._extract_identifier(current_node)
-                    block_type = current_node.type
+                    identifier = self._extract_identifier(current_node, node_query_matches)
+                    block_type = self._get_block_type_from_captures(node_query_matches, current_node.type)
                     start_line = current_node.start_point[0] + 1
                     end_line = current_node.end_point[0] + 1
                     block_content = current_node.text.decode('utf-8') if isinstance(current_node.text, bytes) else current_node.text
@@ -272,9 +298,67 @@ class CodeParser(ICodeParser):
                         ))
                         
         return results
+    
+    def _get_block_type_from_captures(self, captures: List[Tuple], default_type: str) -> str:
+        """从查询捕获中获取更准确的块类型"""
+        try:
+            for capture in captures:
+                capture_name = capture[1]  # capture name
+                
+                # 查找definition.*类型的捕获
+                if capture_name.startswith('definition.'):
+                    return capture_name.replace('definition.', '')
+                    
+                # 查找简单的类型捕获
+                if capture_name in ['function', 'class', 'method', 'interface', 'type', 'enum', 'struct']:
+                    return capture_name
+                    
+            return default_type
+        except Exception:
+            return default_type
         
-    def _extract_identifier(self, node: Node) -> Optional[str]:
-        """从节点中提取标识符"""
+    def _extract_identifier(self, node: Node, query_matches: List = None) -> Optional[str]:
+        """从节点中提取标识符 (增强版)"""
+        try:
+            # 首先尝试从查询匹配中提取name.definition.*
+            if query_matches:
+                for match in query_matches:
+                    for capture in match:
+                        capture_name = capture[1]  # capture name
+                        capture_node = capture[0]  # capture node
+                        
+                        # 查找name.definition.*类型的捕获
+                        if 'name.definition' in capture_name:
+                            # 检查这个捕获是否属于当前节点
+                            if self._node_contains_or_equals(node, capture_node):
+                                return capture_node.text.decode('utf-8')
+                        
+                        # 查找简单的name捕获
+                        if capture_name == 'name':
+                            if self._node_contains_or_equals(node, capture_node):
+                                return capture_node.text.decode('utf-8')
+            
+            # 后备方法：传统的节点遍历
+            return self._extract_identifier_fallback(node)
+            
+        except Exception as e:
+            logger.debug(f"Error extracting identifier: {e}")
+            return self._extract_identifier_fallback(node)
+    
+    def _node_contains_or_equals(self, parent: Node, child: Node) -> bool:
+        """检查父节点是否包含或等于子节点"""
+        if parent == child:
+            return True
+        
+        current = child.parent
+        while current:
+            if current == parent:
+                return True
+            current = current.parent
+        return False
+    
+    def _extract_identifier_fallback(self, node: Node) -> Optional[str]:
+        """后备的标识符提取方法"""
         try:
             # 尝试查找名称字段
             name_node = node.child_by_field_name("name")
