@@ -20,6 +20,14 @@ import tree_sitter_go
 import tree_sitter_java
 import tree_sitter_cpp
 import tree_sitter_c
+import tree_sitter_c_sharp
+import tree_sitter_ruby
+import tree_sitter_php
+import tree_sitter_html
+import tree_sitter_css
+import tree_sitter_json
+import tree_sitter_toml
+import tree_sitter_yaml
 from tree_sitter import Language, Parser, Node, Query
 
 from ..interfaces import ICodeParser, CodeBlock
@@ -59,12 +67,21 @@ class CodeParser(ICodeParser):
                 'hpp': Language(tree_sitter_cpp.language()),
                 'cc': Language(tree_sitter_cpp.language()),
                 'cxx': Language(tree_sitter_cpp.language()),
+                'cs': Language(tree_sitter_c_sharp.language()),
+                'rb': Language(tree_sitter_ruby.language()),
+                'php': Language(tree_sitter_php.language()),
+                'html': Language(tree_sitter_html.language()),
+                'htm': Language(tree_sitter_html.language()),
+                'css': Language(tree_sitter_css.language()),
+                'json': Language(tree_sitter_json.language()),
+                'toml': Language(tree_sitter_toml.language()),
+                'yaml': Language(tree_sitter_yaml.language()),
+                'yml': Language(tree_sitter_yaml.language()),
             }
             
             # 为每种语言创建解析器
             for ext, language in language_map.items():
-                parser = Parser()
-                parser.set_language(language)
+                parser = Parser(language)
                 
                 # 使用完整的TypeScript迁移查询
                 query_pattern = get_query_for_language(ext)

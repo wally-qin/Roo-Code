@@ -16,6 +16,11 @@ from .c_queries import C_QUERY
 from .csharp_queries import CSHARP_QUERY
 from .ruby_queries import RUBY_QUERY
 from .php_queries import PHP_QUERY
+from .html_queries import HTML_QUERY
+from .css_queries import CSS_QUERY
+from .json_queries import JSON_QUERY
+from .toml_queries import TOML_QUERY
+from .yaml_queries import YAML_QUERY
 
 # 语言查询映射
 LANGUAGE_QUERIES = {
@@ -36,6 +41,13 @@ LANGUAGE_QUERIES = {
     'cs': CSHARP_QUERY,
     'rb': RUBY_QUERY,
     'php': PHP_QUERY,
+    'html': HTML_QUERY,
+    'htm': HTML_QUERY,
+    'css': CSS_QUERY,
+    'json': JSON_QUERY,
+    'toml': TOML_QUERY,
+    'yaml': YAML_QUERY,
+    'yml': YAML_QUERY,
 }
 
 def get_query_for_language(extension: str) -> str:
